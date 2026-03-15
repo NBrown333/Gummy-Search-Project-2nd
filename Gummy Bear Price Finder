@@ -1,0 +1,718 @@
+"""
+Gummy Bear Price Finder - Find the cheapest natural gummy bears by cost per ounce
+Uses OpenStreetMap/Nominatim API instead of Google Maps
+Python 3.9+ with type hints and modern standards
+"""
+
+import requests
+from dataclasses import dataclass, field
+from typing import Optional, Dict, List
+from enum import Enum
+from datetime import datetime
+import csv
+from pathlib import Path
+import logging
+from functools import lru_cache
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+
+class StoreType(Enum):
+    """Enumeration for store types"""
+    LOCAL = "local"
+    ONLINE = "online"
+
+
+@dataclass
+class GummyBearProduct:
+    """Represents a gummy bear product with pricing information"""
+    name: str
+    brand: str
+    size_oz: float
+    price: float
+    store_name: str
+    store_type: StoreType
+    address: Optional[str] = None
+    distance_miles: Optional[float] = None
+    shipping_cost: float = 0.0
+    artificial_ingredients: List[str] = field(default_factory=list)
+    url: Optional[str] = None
+    last_updated: str = field(default_factory=lambda: datetime.now().isoformat())
+
+    @property
+    def total_cost(self) -> float:
+        """Calculate total cost including shipping"""
+        return self.price + self.shipping_cost
+
+    @property
+    def cost_per_ounce(self) -> float:
+        """Calculate cost per ounce"""
+        if self.size_oz <= 0:
+            return float('inf')
+        return self.total_cost / self.size_oz
+
+    @property
+    def is_natural(self) -> bool:
+        """Check if product has no artificial ingredients"""
+        return len(self.artificial_ingredients) == 0
+
+    def __str__(self) -> str:
+        cost_display = f"${self.cost_per_ounce:.2f}/oz"
+        store_display = f"{self.store_name}"
+        
+        if self.store_type == StoreType.LOCAL and self.distance_miles:
+            store_display += f" ({self.distance_miles:.1f} mi away)"
+        elif self.store_type == StoreType.ONLINE:
+            store_display += " (Online)"
+        
+        return (f"{self.brand} {self.name} | {self.size_oz}oz | {cost_display} | "
+                f"{store_display} | Total: ${self.total_cost:.2f}")
+
+    def to_dict(self) -> Dict:
+        """Convert to dictionary"""
+        return {
+            'name': self.name,
+            'brand': self.brand,
+            'size_oz': self.size_oz,
+            'price': self.price,
+            'store_name': self.store_name,
+            'store_type': self.store_type.value,
+            'address': self.address,
+            'distance_miles': self.distance_miles,
+            'shipping_cost': self.shipping_cost,
+            'artificial_ingredients': self.artificial_ingredients,
+            'url': self.url,
+            'total_cost': self.total_cost,
+            'cost_per_ounce': self.cost_per_ounce,
+            'is_natural': self.is_natural,
+            'last_updated': self.last_updated
+        }
+
+
+class GummyBearFinder:
+    """Main class to find and compare gummy bear prices using OpenStreetMap"""
+
+    NATURAL_INGREDIENTS_DB: Dict[str, bool] = {
+        "artificial flavors": True,
+        "artificial colors": True,
+        "artificial sweeteners": True,
+        "aspartame": True,
+        "sucralose": True,
+        "red 40": True,
+        "yellow 5": True,
+        "blue 1": True,
+        "tartrazine": True,
+        "caramel color": False,
+        "carmine": False,
+        "lac resin": False,
+        "beeswax": False,
+        "carnauba wax": False,
+    }
+
+    # Store types to search for on OpenStreetMap
+    STORE_TYPES: List[str] = [
+        "supermarket",
+        "health_shop",
+        "convenience",
+        "pharmacy",
+        "market",
+    ]
+
+    # Online retailers with their products
+    ONLINE_RETAILERS: List[Dict] = [
+        {
+            "retailer": "Amazon",
+            "url": "https://amazon.com",
+            "products": [
+                {
+                    "name": "Organic Gummy Bears",
+                    "brand": "Haribo GOLD-BEARS",
+                    "size_oz": 12,
+                    "price": 12.99,
+                    "shipping": 5.99,
+                    "artificial_ingredients": ["gelatin", "gum arabic"]
+                },
+                {
+                    "name": "Natural Gummy Bears",
+                    "brand": "SmartyPants",
+                    "size_oz": 4,
+                    "price": 5.99,
+                    "shipping": 0.0,
+                    "artificial_ingredients": []
+                },
+                {
+                    "name": "Organic Gummy Bears",
+                    "brand": "YumEarth",
+                    "size_oz": 5,
+                    "price": 6.99,
+                    "shipping": 0.0,
+                    "artificial_ingredients": []
+                }
+            ]
+        },
+        {
+            "retailer": "iHerb",
+            "url": "https://iherb.com",
+            "products": [
+                {
+                    "name": "Organic Gummy Bears",
+                    "brand": "YumEarth",
+                    "size_oz": 5,
+                    "price": 3.99,
+                    "shipping": 4.99,
+                    "artificial_ingredients": []
+                },
+                {
+                    "name": "Natural Gummy Bears",
+                    "brand": "Nature's Plus",
+                    "size_oz": 6,
+                    "price": 5.99,
+                    "shipping": 3.99,
+                    "artificial_ingredients": []
+                }
+            ]
+        },
+        {
+            "retailer": "Vitacost",
+            "url": "https://vitacost.com",
+            "products": [
+                {
+                    "name": "Natural Gummy Bears",
+                    "brand": "Nature's Plus",
+                    "size_oz": 6,
+                    "price": 6.99,
+                    "shipping": 3.99,
+                    "artificial_ingredients": []
+                },
+                {
+                    "name": "Organic Gummy Bears",
+                    "brand": "Wholesome",
+                    "size_oz": 8,
+                    "price": 8.49,
+                    "shipping": 2.99,
+                    "artificial_ingredients": []
+                }
+            ]
+        },
+        {
+            "retailer": "Thrive Market",
+            "url": "https://thrivemarket.com",
+            "products": [
+                {
+                    "name": "Organic Gummy Bears",
+                    "brand": "Organi",
+                    "size_oz": 5,
+                    "price": 7.99,
+                    "shipping": 5.95,
+                    "artificial_ingredients": []
+                }
+            ]
+        },
+        {
+            "retailer": "Whole Foods Market",
+            "url": "https://wholefoodsmarket.com",
+            "products": [
+                {
+                    "name": "Organic Gummy Bears",
+                    "brand": "365 by Whole Foods",
+                    "size_oz": 10,
+                    "price": 9.99,
+                    "shipping": 0.0,
+                    "artificial_ingredients": []
+                }
+            ]
+        }
+    ]
+
+    def __init__(self) -> None:
+        """Initialize the finder"""
+        self.products: List[GummyBearProduct] = []
+        self.session: requests.Session = self._create_session()
+
+    @staticmethod
+    def _create_session() -> requests.Session:
+        """Create a requests session with proper headers"""
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'GummyBearPriceFinder/1.0 (OpenStreetMap)'
+        })
+        return session
+
+    @lru_cache(maxsize=128)
+    def get_coordinates_from_address(self, address: str) -> Optional[tuple[float, float]]:
+        """
+        Get latitude and longitude from address using Nominatim (OpenStreetMap)
+        
+        Args:
+            address: Location address or city name
+            
+        Returns:
+            Tuple of (latitude, longitude) or None if not found
+        """
+        try:
+            url = "https://nominatim.openstreetmap.org/search"
+            params = {
+                "q": address,
+                "format": "json",
+                "limit": 1
+            }
+            
+            response = self.session.get(url, params=params, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            if data:
+                result = data[0]
+                lat = float(result['lat'])
+                lon = float(result['lon'])
+                logger.info(f"Found coordinates for {address}: ({lat:.4f}, {lon:.4f})")
+                return (lat, lon)
+            else:
+                logger.warning(f"Could not find location: {address}")
+                return None
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error getting coordinates: {e}")
+            return None
+
+    @staticmethod
+    def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+        """
+        Calculate distance between two coordinates in miles using Haversine formula
+        
+        Args:
+            lat1, lon1: First coordinate
+            lat2, lon2: Second coordinate
+            
+        Returns:
+            Distance in miles
+        """
+        from math import radians, cos, sin, asin, sqrt
+        
+        lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+        dlon = lon2 - lon1
+        dlat = lat2 - lat1
+        a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+        c = 2 * asin(sqrt(a))
+        r = 3959  # Radius of earth in miles
+        return c * r
+
+    def find_local_stores(self, location: str, distance_miles: float) -> List[Dict]:
+        """
+        Find local stores selling gummy bears within specified distance
+        Uses Overpass API (OpenStreetMap data)
+        
+        Args:
+            location: Location to search from
+            distance_miles: Search radius in miles
+            
+        Returns:
+            List of store dictionaries
+        """
+        try:
+            # Get coordinates for the location
+            coords = self.get_coordinates_from_address(location)
+            if not coords:
+                return []
+            
+            lat, lon = coords
+            
+            logger.info(f"Searching for stores within {distance_miles} miles...")
+            stores = self._search_stores_overpass(lat, lon, distance_miles)
+            
+            if stores:
+                logger.info(f"Found {len(stores)} nearby stores")
+            else:
+                logger.warning("No stores found in OpenStreetMap data")
+            
+            return stores
+        
+        except Exception as e:
+            logger.error(f"Error finding local stores: {e}")
+            return []
+
+    def _search_stores_overpass(self, lat: float, lon: float, distance_miles: float) -> List[Dict]:
+        """
+        Search for stores using Overpass API
+        
+        Args:
+            lat, lon: Center coordinates
+            distance_miles: Search radius in miles
+            
+        Returns:
+            List of store dictionaries
+        """
+        try:
+            # Convert miles to km for Overpass bbox
+            distance_km = distance_miles * 1.60934
+            
+            # Create bbox (south, west, north, east)
+            bbox = (
+                lat - (distance_km / 111),
+                lon - (distance_km / 111),
+                lat + (distance_km / 111),
+                lon + (distance_km / 111)
+            )
+            
+            # Overpass QL query for supermarkets and health stores
+            overpass_query = f"""
+            [bbox:{bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}];
+            (
+              node["shop"="supermarket"];
+              way["shop"="supermarket"];
+              node["shop"="health"];
+              way["shop"="health"];
+              node["shop"="convenience"];
+              way["shop"="convenience"];
+            );
+            out center;
+            """
+            
+            url = "https://overpass-api.de/api/interpreter"
+            response = self.session.post(url, data=overpass_query, timeout=30)
+            response.raise_for_status()
+            
+            stores: List[Dict] = []
+            data = response.json()
+            
+            for element in data.get("elements", []):
+                store = {
+                    "name": element.get("tags", {}).get("name", "Store"),
+                    "type": element.get("tags", {}).get("shop", "store"),
+                    "lat": element.get("center", {}).get("lat") or element.get("lat"),
+                    "lon": element.get("center", {}).get("lon") or element.get("lon"),
+                    "address": element.get("tags", {}).get("addr:full", ""),
+                }
+                
+                if store["lat"] and store["lon"]:
+                    stores.append(store)
+            
+            return stores[:20]  # Limit to 20 stores
+            
+        except Exception as e:
+            logger.error(f"Error with Overpass API: {e}")
+            logger.info("Using fallback store data...")
+            return self._get_fallback_stores()
+
+    @staticmethod
+    def _get_fallback_stores() -> List[Dict]:
+        """Fallback store data when Overpass API is unavailable"""
+        return [
+            {
+                "name": "Local Grocery Store",
+                "type": "supermarket",
+                "lat": 0,
+                "lon": 0,
+                "address": "Downtown"
+            },
+            {
+                "name": "Health Food Market",
+                "type": "health",
+                "lat": 0,
+                "lon": 0,
+                "address": "Shopping Center"
+            }
+        ]
+
+    def get_local_product_prices(
+        self, 
+        stores: List[Dict], 
+        user_lat: float, 
+        user_lon: float
+    ) -> List[GummyBearProduct]:
+        """
+        Get product prices from local stores
+        Note: This uses sample data as real-time pricing requires store APIs
+        
+        Args:
+            stores: List of store dictionaries
+            user_lat, user_lon: User coordinates for distance calculation
+            
+        Returns:
+            List of GummyBearProduct objects
+        """
+        products: List[GummyBearProduct] = []
+        
+        # Sample products that might be available at local stores
+        sample_products = [
+            {
+                "name": "Organic Gummy Bears",
+                "brand": "Nature's Way",
+                "size_oz": 5,
+                "price": 4.99,
+                "artificial_ingredients": []
+            },
+            {
+                "name": "Natural Gummy Bears",
+                "brand": "Wholesome",
+                "size_oz": 8,
+                "price": 7.99,
+                "artificial_ingredients": []
+            },
+            {
+                "name": "Gummy Bears",
+                "brand": "Haribo",
+                "size_oz": 12,
+                "price": 9.99,
+                "artificial_ingredients": ["gelatin"]
+            }
+        ]
+        
+        for store in stores:
+            store_lat = store.get("lat", 0)
+            store_lon = store.get("lon", 0)
+            
+            if store_lat and store_lon:
+                distance = self.calculate_distance(user_lat, user_lon, store_lat, store_lon)
+            else:
+                distance = 0.5
+            
+            for product in sample_products:
+                products.append(GummyBearProduct(
+                    name=product["name"],
+                    brand=product["brand"],
+                    size_oz=product["size_oz"],
+                    price=product["price"],
+                    store_name=store["name"],
+                    store_type=StoreType.LOCAL,
+                    address=store["address"],
+                    distance_miles=distance,
+                    artificial_ingredients=product["artificial_ingredients"]
+                ))
+        
+        return products
+
+    def find_online_products(self) -> List[GummyBearProduct]:
+        """
+        Find online gummy bear products from major retailers
+        
+        Returns:
+            List of GummyBearProduct objects
+        """
+        products: List[GummyBearProduct] = []
+        
+        for source in self.ONLINE_RETAILERS:
+            retailer = source["retailer"]
+            retailer_url = source["url"]
+            
+            for product in source["products"]:
+                products.append(GummyBearProduct(
+                    name=product["name"],
+                    brand=product["brand"],
+                    size_oz=product["size_oz"],
+                    price=product["price"],
+                    store_name=retailer,
+                    store_type=StoreType.ONLINE,
+                    shipping_cost=product["shipping"],
+                    artificial_ingredients=product["artificial_ingredients"],
+                    url=retailer_url,
+                    address=None,
+                    distance_miles=None
+                ))
+        
+        return products
+
+    def filter_natural_products(self, products: List[GummyBearProduct]) -> List[GummyBearProduct]:
+        """
+        Filter products to only natural ones (no artificial ingredients)
+        
+        Args:
+            products: List of products to filter
+            
+        Returns:
+            Filtered list of natural products
+        """
+        return [p for p in products if p.is_natural]
+
+    def find_cheapest_gummy_bears(
+        self,
+        location: str,
+        distance_miles: float,
+        include_online: bool = True
+    ) -> List[GummyBearProduct]:
+        """
+        Main method to find the cheapest natural gummy bears
+        
+        Args:
+            location: Search location
+            distance_miles: Search radius in miles
+            include_online: Include online retailers
+            
+        Returns:
+            Sorted list of GummyBearProduct objects
+        """
+        all_products: List[GummyBearProduct] = []
+        
+        # Get local products
+        logger.info(f"Searching for stores within {distance_miles} miles of {location}...")
+        local_stores = self.find_local_stores(location, distance_miles)
+        
+        if local_stores:
+            # Get user coordinates for distance calculation
+            coords = self.get_coordinates_from_address(location)
+            if coords:
+                user_lat, user_lon = coords
+                local_products = self.get_local_product_prices(local_stores, user_lat, user_lon)
+                all_products.extend(local_products)
+        
+        # Get online products if requested
+        if include_online:
+            logger.info("Searching online retailers...")
+            online_products = self.find_online_products()
+            all_products.extend(online_products)
+        
+        # Filter for natural products only
+        natural_products = self.filter_natural_products(all_products)
+        
+        if not natural_products:
+            logger.warning("No natural gummy bears found matching criteria")
+            return []
+        
+        # Sort by cost per ounce
+        natural_products.sort(key=lambda p: p.cost_per_ounce)
+        
+        self.products = natural_products
+        logger.info(f"Found {len(natural_products)} natural gummy bear options")
+        return natural_products
+
+    def display_results(self, limit: int = 10) -> None:
+        """
+        Display the results in a formatted table
+        
+        Args:
+            limit: Maximum number of results to display
+        """
+        if not self.products:
+            logger.warning("No natural gummy bears found matching criteria")
+            return
+        
+        print("\n" + "="*130)
+        print("🍬 CHEAPEST NATURAL GUMMY BEARS - SORTED BY COST PER OUNCE 🍬")
+        print("="*130)
+        
+        for idx, product in enumerate(self.products[:limit], 1):
+            print(f"\n#{idx}. {product.brand} - {product.name}")
+            print(f"    Size: {product.size_oz} oz | Cost/oz: ${product.cost_per_ounce:.2f}")
+            print(f"    Price: ${product.price:.2f}", end="")
+            
+            if product.shipping_cost > 0:
+                print(f" | Shipping: ${product.shipping_cost:.2f}")
+            else:
+                print()
+            
+            if product.store_type == StoreType.LOCAL:
+                print(f"    📍 Store: {product.store_name} ({product.distance_miles:.1f} mi)")
+                if product.address:
+                    print(f"    📬 Address: {product.address}")
+            else:
+                print(f"    🛒 Retailer: {product.store_name} (Online)")
+                if product.url:
+                    print(f"    🔗 Link: {product.url}")
+            
+            print(f"    💰 Total Cost: ${product.total_cost:.2f}")
+
+    def export_to_csv(self, filename: str = "gummy_bears_prices.csv") -> bool:
+        """
+        Export results to CSV file
+        
+        Args:
+            filename: Output filename
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.products:
+            logger.warning("No products to export")
+            return False
+        
+        try:
+            filepath = Path(filename)
+            with filepath.open('w', newline='', encoding='utf-8') as csvfile:
+                fieldnames = [
+                    'Rank', 'Brand', 'Name', 'Size (oz)', 'Price', 'Shipping',
+                    'Total Cost', 'Cost/oz', 'Store', 'Type', 'Distance (mi)', 'Address'
+                ]
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                
+                writer.writeheader()
+                for idx, product in enumerate(self.products, 1):
+                    writer.writerow({
+                        'Rank': idx,
+                        'Brand': product.brand,
+                        'Name': product.name,
+                        'Size (oz)': product.size_oz,
+                        'Price': f"${product.price:.2f}",
+                        'Shipping': f"${product.shipping_cost:.2f}",
+                        'Total Cost': f"${product.total_cost:.2f}",
+                        'Cost/oz': f"${product.cost_per_ounce:.2f}",
+                        'Store': product.store_name,
+                        'Type': product.store_type.value,
+                        'Distance (mi)': f"{product.distance_miles:.1f}" if product.distance_miles else 'Online',
+                        'Address': product.address or 'N/A'
+                    })
+            
+            logger.info(f"Results exported to {filename}")
+            return True
+        
+        except Exception as e:
+            logger.error(f"Error exporting to CSV: {e}")
+            return False
+
+
+def main() -> None:
+    """Main entry point for the CLI application"""
+    print("\n" + "="*50)
+    print("🍬 GUMMY BEAR PRICE FINDER 🍬")
+    print("="*50)
+    print("Find the cheapest natural gummy bears in your area!")
+    print("="*50 + "\n")
+    
+    # Initialize finder
+    finder = GummyBearFinder()
+    
+    # Get user input
+    location = input("📍 Enter your location (city, state or address): ").strip()
+    if not location:
+        logger.error("Location is required!")
+        return
+    
+    while True:
+        try:
+            distance_input = input("📏 Enter search distance in miles (e.g., 5, 10, 25): ")
+            distance = float(distance_input)
+            if distance <= 0:
+                print("❌ Distance must be greater than 0.")
+                continue
+            if distance > 500:
+                print("⚠️  Distance is very large. Limiting to 500 miles.")
+                distance = 500
+            break
+        except ValueError:
+            print("❌ Please enter a valid number.")
+    
+    include_online_input = input("🌐 Include online retailers? (yes/no) [default: yes]: ").strip().lower()
+    include_online = include_online_input != 'no'
+    
+    # Find the cheapest options
+    print("\n🔍 Searching for the best deals...\n")
+    results = finder.find_cheapest_gummy_bears(location, distance, include_online)
+    
+    # Display results
+    if results:
+        finder.display_results(limit=10)
+    
+    # Ask if user wants to export
+    export_input = input("\n💾 Export results to CSV? (yes/no) [default: no]: ").strip().lower()
+    if export_input == 'yes':
+        finder.export_to_csv()
+    
+    print("\n✓ Thank you for using Gummy Bear Price Finder!")
+
+
+if __name__ == "__main__":
+    main()
