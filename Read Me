@@ -1,0 +1,51 @@
+# 🍬 Gummy Bear Price Finder
+
+A complete web application that finds the cheapest **natural gummy bears** (no artificial ingredients) in your area and online, with all prices normalized to cost per ounce including shipping. **No API keys required!** Uses free OpenStreetMap data.
+
+![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
+![Flask](https://img.shields.io/badge/Flask-2.3+-green.svg)
+![License](https://img.shields.io/badge/License-MIT-yellow.svg)
+![OpenStreetMap](https://img.shields.io/badge/OpenStreetMap-Free-success.svg)
+
+## ✨ Features
+
+✅ **Zero API Keys** - Uses free OpenStreetMap/Nominatim data
+✅ **Local Store Search** - Find nearby stores within your specified distance
+✅ **Online Retailers** - Compare prices from Amazon, iHerb, Vitacost, Thrive Market, and more
+✅ **Natural Filter** - Only shows products with NO artificial ingredients
+✅ **Cost Per Ounce** - All prices normalized for fair comparison
+✅ **Shipping Included** - Online prices factor in delivery costs
+✅ **CSV Export** - Download results for further analysis
+✅ **Modern Web UI** - Beautiful, responsive Bootstrap interface
+✅ **Mobile Friendly** - Works on all devices
+✅ **CLI Support** - Command-line interface available
+✅ **Real-time Search** - Get results instantly
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.8 or higher
+- pip (Python package manager)
+- Modern web browser
+
+### Installation
+
+1. **Clone the repository:**
+```bash
+git clone https://github.com/NBrown333/gummy-bear-price-finder.git
+cd gummy-bear-price-finder
+```
+
+2. **Create a virtual environment:**
+```bash
+python -m venv venv
+
+# On Windows:
+venv\Scripts\activate
+
+# On macOS/Linux:
+source venv/bin/activate
+```
+
+3. **Install
